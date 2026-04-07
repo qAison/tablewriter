@@ -8,6 +8,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/pkg/twwidth"
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
 )
@@ -600,4 +601,117 @@ func TestBugRenditionDebugLeak(t *testing.T) {
 			t.Errorf("debug output leaked from Ocean.Rendition despite WithDebug(false):\n%s", debugBuf.String())
 		}
 	})
+}
+
+// TestBugStreamWidthReduction tests that streaming mode correctly reduces column widths
+// to respect the global width constraint, even when multiple columns are at minimum width
+// and the round-robin distribution needs to skip them to find reducible columns.
+func TestBugStreamWidthReduction(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		global  int
+		headers []string
+		row     []string
+	}{
+		{
+			name:    "NarrowWith5Cols",
+			global:  12,
+			headers: []string{"AAAAAA", "BB", "CC", "DD", "EE"},
+			row:     []string{"123456", "12", "12", "12", "12"},
+		},
+		{
+			name:    "VeryNarrowWith3Cols",
+			global:  10,
+			headers: []string{"Name", "Value", "X"},
+			row:     []string{"LongNameHere", "SomeValue!", "Y"},
+		},
+		{
+			name:    "TightWith4Cols",
+			global:  10,
+			headers: []string{"AA", "BB", "CC", "DD"},
+			row:     []string{"11", "22", "33", "44"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			st := createStreamTable(t, &buf,
+				tablewriter.WithConfig(tablewriter.Config{
+					Row: tw.CellConfig{
+						Formatting: tw.CellFormatting{AutoWrap: tw.WrapTruncate},
+					},
+					Stream: tw.StreamConfig{Enable: true},
+					Widths: tw.CellWidth{Global: tt.global},
+				}),
+			)
+			if err := st.Start(); err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+			st.Header(tt.headers)
+			st.Append(tt.row)
+			if err := st.Close(); err != nil {
+				t.Fatalf("Close failed: %v", err)
+			}
+
+			output := buf.String()
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+			for i, line := range lines {
+				// Subtract 2 for left and right border characters
+				lineWidth := twwidth.Width(line) - 2
+				if lineWidth > tt.global {
+					t.Errorf("line %d exceeds global width %d (got %d): %s", i, tt.global, lineWidth, line)
+				}
+			}
+		})
+	}
+}
+
+// TestBugMergedHeaderOverDistribution tests that batch mode correctly handles
+// over-distribution correction when merging headers, terminating early when
+// no eligible columns remain for reduction.
+func TestBugMergedHeaderOverDistribution(t *testing.T) {
+	var buf bytes.Buffer
+	table := tablewriter.NewTable(&buf,
+		tablewriter.WithConfig(tablewriter.Config{
+			Header: tw.CellConfig{
+				Merging: tw.CellMerging{Mode: tw.MergeHorizontal},
+			},
+		}),
+		tablewriter.WithRenderer(renderer.NewBlueprint(tw.Rendition{
+			Settings: tw.Settings{
+				Separators: tw.Separators{BetweenRows: tw.Off},
+			},
+		})),
+	)
+	// Short merged header spanning many columns with narrow content
+	table.Header([]string{"Merged", "Merged", "Merged", "Merged"})
+	table.Append([]string{"A", "B", "C", "D"})
+	table.Append([]string{"1", "2", "3", "4"})
+	table.Render()
+
+	output := buf.String()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+
+	// All lines should have the same width (consistent table rendering)
+	if len(lines) == 0 {
+		t.Fatal("no output lines")
+	}
+	firstWidth := twwidth.Width(lines[0])
+	for i, line := range lines {
+		w := twwidth.Width(line)
+		if w != firstWidth {
+			t.Errorf("line %d has width %d, expected %d: %s", i, w, firstWidth, line)
+		}
+	}
+
+	expected := `
+		┌───────────────────────────────────┐
+		│              MERGED               │
+		├────────┬────────┬────────┬────────┤
+		│ A      │ B      │ C      │ D      │
+		│ 1      │ 2      │ 3      │ 4      │
+		└────────┴────────┴────────┴────────┘
+	`
+	if !visualCheck(t, "MergedHeaderOverDistribution", output, expected) {
+		t.Error(table.Debug())
+	}
 }

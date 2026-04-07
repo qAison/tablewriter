@@ -795,14 +795,20 @@ func (t *Table) calculateAndNormalizeWidths(ctx *renderContext) error {
 						// Sort columns for deterministic reduction
 						sortedCols := workingWidths.SortedKeys()
 						for i := 0; i < overDistributed; i++ {
+							reduced := false
 							// Reduce from highest-indexed column
 							for j := len(sortedCols) - 1; j >= 0; j-- {
 								col := sortedCols[j]
 								if workingWidths.Get(col) > 1 && naturalColumnWidths.Get(col) < workingWidths.Get(col) {
 									workingWidths.Set(col, workingWidths.Get(col)-1)
 									ctx.logger.Debugf("Reduced col %d by 1 to %d", col, workingWidths.Get(col))
+									reduced = true
 									break
 								}
+							}
+							if !reduced {
+								// No eligible column found, no further reduction possible
+								break
 							}
 						}
 					}
